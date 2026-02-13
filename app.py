@@ -32,7 +32,7 @@ with st.sidebar:
 
     analyze_btn = st.button("🚀 開始執行比較分析")
 
-# 3. 核心處理函數 (保持原始修正邏輯)
+# 3. 核心處理函數
 def get_adjusted_data(symbol, start, end):
     buffer_start = start - timedelta(days=400)
     data = yf.download(symbol, start=buffer_start, end=end, auto_adjust=False, progress=False)
@@ -45,7 +45,6 @@ def get_adjusted_data(symbol, start, end):
 
     series = series.dropna().copy()
     
-    # 原始修正邏輯
     if symbol == "0050.TW":
         series.loc[series.index < pd.Timestamp("2014-01-02")] /= 4
     elif symbol == "0052.TW":
@@ -72,8 +71,11 @@ if analyze_btn and symbols:
             reference_stock = [s for s, d in stock_start_info.items() if d == latest_start_date][0]
             common_end_date = min([s.index[-1] for s in raw_series_dict.values()])
 
+            # 定義時間區段字串
+            time_period_str = f"{latest_start_date.strftime('%Y-%m-%d')} ~ {common_end_date.strftime('%Y-%m-%d')}"
+
             st.success(f"📌 **同步計算基準：** 已取最短共同區間進行對比。")
-            st.info(f"📅 **實際回測期間：** `{latest_start_date.strftime('%Y-%m-%d')}` 至 `{common_end_date.strftime('%Y-%m-%d')}` (基準：`{reference_stock}`)")
+            st.info(f"📅 **實際回測期間：** `{time_period_str}` (基準標的：`{reference_stock}`)")
 
             all_assets_df = pd.DataFrame()
             all_roi_df = pd.DataFrame()
@@ -82,7 +84,7 @@ if analyze_btn and symbols:
             for sym, series in raw_series_dict.items():
                 invest_series = series[series.index >= latest_start_date]
 
-                # --- 計算最大回撤 (MDD) ---
+                # MDD 計算
                 rolling_max = invest_series.cummax()
                 drawdowns = (invest_series - rolling_max) / rolling_max
                 max_drawdown = drawdowns.min()
@@ -91,11 +93,11 @@ if analyze_btn and symbols:
                 mdd_start_date = invest_series[:mdd_end_date].idxmax()
                 mdd_period = f"{mdd_start_date.strftime('%Y-%m-%d')} ~ {mdd_end_date.strftime('%Y-%m-%d')}"
 
-                # --- 計算年化波動度 ---
+                # 波動度計算
                 daily_returns = invest_series.pct_change().dropna()
                 annual_volatility = daily_returns.std() * np.sqrt(252)
 
-                # --- 年度報酬與資產計算 ---
+                # 年度報酬與資產計算
                 years = sorted(list(set(invest_series.index.year)))
                 current_assets = initial_capital
                 s_price = float(invest_series.iloc[0])
@@ -120,12 +122,10 @@ if analyze_btn and symbols:
                 all_assets_df[sym] = pd.Series(temp_assets)
                 all_roi_df[sym] = pd.Series(temp_rois)
 
-                # 計算總體指標
                 total_roi = (current_assets - initial_capital) / initial_capital
                 days = (invest_series.index[-1] - invest_series.index[0]).days
                 cagr = (current_assets / initial_capital) ** (365.25 / days) - 1 if days > 0 else 0
 
-                # --- 調整字典順序：總報酬率移到年化報酬率之前 ---
                 summary_data.append({
                     "股票代號": sym,
                     "最終資產": round(current_assets, 0),
@@ -136,14 +136,14 @@ if analyze_btn and symbols:
                     "MDD 發生期間 (高點 → 低點)": mdd_period
                 })
 
-            # 整理與排序表格 (預設依總報酬率排序)
             summary_df = pd.DataFrame(summary_data)
             summary_df = summary_df.sort_values(by="總報酬率 %", ascending=False)
 
             st.subheader(f"📊 多股累積資產成長圖 (起始資產 ${initial_capital:,.0f})")
             st.line_chart(all_assets_df)
 
-            st.subheader("📋 績效與風險總結 (對齊區間)")
+            # --- 修改部分：標題改為顯示計算的時間區段 ---
+            st.subheader(f"📋 績效與風險總結 ({time_period_str})")
             st.info("💡 提示：點擊下方表格標題即可依照該項指標重新排序。")
             
             st.dataframe(
