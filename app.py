@@ -17,10 +17,10 @@ with st.sidebar:
 
     st.divider()
     st.header("2. 輸入股票代號")
+    # ✨ 更新預設股票清單
     input_df = pd.DataFrame([
-        {"代號": "0050.TW"}, {"代號": "0052.TW"}, {"代號": "QQQ"}, 
-        {"代號": ""}, {"代號": ""}, {"代號": ""}, 
-        {"代號": ""}, {"代號": ""}, {"代號": ""}
+        {"代號": "2330.TW"}, {"代號": "0050.TW"}, {"代號": "00662.TW"}, {"代號": "00646.TW"},
+        {"代號": ""}, {"代號": ""}, {"代號": ""}, {"代號": ""}, {"代號": ""}
     ])
     edited_df = st.data_editor(input_df, num_rows="fixed", hide_index=True)
 
@@ -45,6 +45,7 @@ def get_adjusted_data(symbol, start, end):
 
     series = series.dropna().copy()
     
+    # 原始修正邏輯
     if symbol == "0050.TW":
         series.loc[series.index < pd.Timestamp("2014-01-02")] /= 4
     elif symbol == "0052.TW":
@@ -67,11 +68,11 @@ if analyze_btn and symbols:
                         stock_start_info[sym] = actual_start_in_range[0]
 
         if raw_series_dict:
+            # 尋找共同起始點
             latest_start_date = max(stock_start_info.values())
             reference_stock = [s for s, d in stock_start_info.items() if d == latest_start_date][0]
             common_end_date = min([s.index[-1] for s in raw_series_dict.values()])
 
-            # 定義時間區段字串
             time_period_str = f"{latest_start_date.strftime('%Y-%m-%d')} ~ {common_end_date.strftime('%Y-%m-%d')}"
 
             st.success(f"📌 **同步計算基準：** 已取最短共同區間進行對比。")
@@ -142,7 +143,6 @@ if analyze_btn and symbols:
             st.subheader(f"📊 多股累積資產成長圖 (起始資產 ${initial_capital:,.0f})")
             st.line_chart(all_assets_df)
 
-            # --- 修改部分：標題改為顯示計算的時間區段 ---
             st.subheader(f"📋 績效與風險總結 ({time_period_str})")
             st.info("💡 提示：點擊下方表格標題即可依照該項指標重新排序。")
             
