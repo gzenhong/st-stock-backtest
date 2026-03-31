@@ -91,36 +91,38 @@ def get_adjusted_data(symbol, start, end):
 
     # --- Yahoo Finance ---
     else:
-        data = yf.download(symbol, start=buffer_start, end=buffer_end, auto_adjust=False, progress=False)
-        if data.empty:
+        ticker = yf.Ticker(symbol)
+
+        # close：buffer_start + auto_adjust=True，除息還原，確保年度計算有前一年底收盤價
+        # high/low：start（非 buffer）+ auto_adjust=False，取真實原始成交價
+        #           不用 buffer 避免 yfinance 把舊資料回溯調整放大，蓋過近期真實高點
+        data_close = ticker.history(start=buffer_start, end=buffer_end, auto_adjust=True,  actions=False)
+        data_hl    = ticker.history(start=start,        end=buffer_end, auto_adjust=False, actions=False)
+
+        if data_close.empty or data_hl.empty:
             st.warning(f"Yahoo Finance 查無 {symbol} 數據。")
             return None
 
-        if isinstance(data.columns, pd.MultiIndex):
-            close = data["Adj Close"][symbol] if "Adj Close" in data.columns.get_level_values(0) else data["Close"][symbol]
-            high  = data["High"][symbol]
-            low   = data["Low"][symbol]
-        else:
-            close = data["Adj Close"] if "Adj Close" in data.columns else data["Close"]
-            high  = data["High"]
-            low   = data["Low"]
+        data_close.index = data_close.index.tz_localize(None)
+        data_hl.index    = data_hl.index.tz_localize(None)
 
-        close = close.dropna().copy()
-        high  = high.reindex(close.index).ffill().copy()
-        low   = low.reindex(close.index).ffill().copy()
-        for s in (close, high, low):
-            s.index = s.index.tz_localize(None)
+        close = data_close["Close"].dropna().copy()
+        high  = data_hl["High"].dropna().copy()
+        low   = data_hl["Low"].dropna().copy()
 
         if upper_symbol == "0050.TW":
-            mask = close.index < pd.Timestamp("2014-01-02")
-            close.loc[mask] /= 4
-            high.loc[mask]  /= 4
-            low.loc[mask]   /= 4
+            close.loc[close.index < pd.Timestamp("2014-01-02")] /= 4
+            high.loc[high.index   < pd.Timestamp("2014-01-02")] /= 4
+            low.loc[low.index     < pd.Timestamp("2014-01-02")] /= 4
         elif upper_symbol == "0052.TW":
-            mask = close.index < pd.Timestamp("2025-11-17")
-            close.loc[mask] /= 7
-            high.loc[mask]  /= 7
-            low.loc[mask]   /= 7
+            close.loc[close.index < pd.Timestamp("2025-11-17")] /= 7
+            high.loc[high.index   < pd.Timestamp("2025-11-17")] /= 7
+            low.loc[low.index     < pd.Timestamp("2025-11-17")] /= 7
+        elif upper_symbol == "00631L.TW":
+            split_date = pd.Timestamp("2026-03-23")
+            close.loc[close.index < split_date] /= 22
+            high.loc[high.index   < split_date] /= 22
+            low.loc[low.index     < split_date] /= 22
 
         return {"close": close, "high": high, "low": low}
 
@@ -160,10 +162,11 @@ if analyze_btn and symbols:
                 high_s  = res["high"]
                 low_s   = res["low"]
 
-                # ✨ 終極修復：無論資料來源為何，強制在 end_date 畫下一刀，超過的資料全部丟棄！
-                close_s = close_s[close_s.index <= pd.Timestamp(end_date)]
-                high_s  = high_s[high_s.index   <= pd.Timestamp(end_date)]
-                low_s   = low_s[low_s.index     <= pd.Timestamp(end_date)]
+                # 強制在 end_date 畫下一刀，用 end_date+1 確保當天資料不被截掉
+                cutoff = pd.Timestamp(end_date) + pd.Timedelta(days=1)
+                close_s = close_s[close_s.index < cutoff]
+                high_s  = high_s[high_s.index   < cutoff]
+                low_s   = low_s[low_s.index     < cutoff]
 
                 actual_start_in_range = close_s[close_s.index >= pd.Timestamp(start_date)].index
                 if not actual_start_in_range.empty:
@@ -189,11 +192,11 @@ if analyze_btn and symbols:
         for sym, series in raw_series_dict.items():
             invest_series = series[series.index >= latest_start_date]
 
-            # 計算 MDD：高點用 High，低點用 Low
-            invest_high = raw_high_dict[sym][raw_high_dict[sym].index >= latest_start_date].reindex(invest_series.index).ffill()
-            invest_low  = raw_low_dict[sym][raw_low_dict[sym].index   >= latest_start_date].reindex(invest_series.index).ffill()
+            # 計算 MDD：高點用 High，低點用 Low（各自保留完整索引，不強制對齊 close）
+            invest_high = raw_high_dict[sym][raw_high_dict[sym].index >= latest_start_date]
+            invest_low  = raw_low_dict[sym][raw_low_dict[sym].index   >= latest_start_date]
             rolling_max  = invest_high.cummax()
-            drawdowns    = (invest_low - rolling_max) / rolling_max
+            drawdowns    = (invest_low - rolling_max.reindex(invest_low.index).ffill()) / rolling_max.reindex(invest_low.index).ffill()
             max_drawdown = drawdowns.min()
             mdd_end_date   = drawdowns.idxmin()
             mdd_start_date = invest_high[:mdd_end_date].idxmax()

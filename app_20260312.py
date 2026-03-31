@@ -55,13 +55,9 @@ def get_adjusted_data(symbol, start, end):
             df = pd.read_csv(file_name)
             df['Date'] = pd.to_datetime(df['Date'])
             df.set_index('Date', inplace=True)
-            def clean(col): return df[col].astype(str).str.replace(',', '').astype(float)
-            close = clean(col_name).sort_index().ffill()
-            high  = clean('High').sort_index().ffill()
-            low   = clean('Low').sort_index().ffill()
-            for s in (close, high, low):
-                s.index = s.index.tz_localize(None)
-            return {"close": close, "high": high, "low": low}
+            series = df[col_name].astype(str).str.replace(',', '').astype(float)
+            series.index = series.index.tz_localize(None) 
+            return series.sort_index().ffill()
         except Exception as e:
             st.error(f"讀取 {file_name} 失敗：{e}")
             return None
@@ -77,14 +73,10 @@ def get_adjusted_data(symbol, start, end):
             df = pd.read_csv(file_name)
             df['Date'] = pd.to_datetime(df['Date'])
             df.set_index('Date', inplace=True)
-            def clean(col): return df[col].astype(str).str.replace(',', '').astype(float)
             target_col = 'Adj Close' if 'Adj Close' in df.columns else 'Close'
-            close = clean(target_col).sort_index().ffill()
-            high  = clean('High').sort_index().ffill()
-            low   = clean('Low').sort_index().ffill()
-            for s in (close, high, low):
-                s.index = s.index.tz_localize(None)
-            return {"close": close, "high": high, "low": low}
+            series = df[target_col].astype(str).str.replace(',', '').astype(float)
+            series.index = series.index.tz_localize(None)
+            return series.sort_index().ffill()
         except Exception as e:
             st.error(f"讀取 {file_name} 失敗：{e}")
             return None
@@ -97,32 +89,18 @@ def get_adjusted_data(symbol, start, end):
             return None
 
         if isinstance(data.columns, pd.MultiIndex):
-            close = data["Adj Close"][symbol] if "Adj Close" in data.columns.get_level_values(0) else data["Close"][symbol]
-            high  = data["High"][symbol]
-            low   = data["Low"][symbol]
+            series = data["Adj Close"][symbol] if "Adj Close" in data.columns.get_level_values(0) else data["Close"][symbol]
         else:
-            close = data["Adj Close"] if "Adj Close" in data.columns else data["Close"]
-            high  = data["High"]
-            low   = data["Low"]
+            series = data["Adj Close"] if "Adj Close" in data.columns else data["Close"]
 
-        close = close.dropna().copy()
-        high  = high.reindex(close.index).ffill().copy()
-        low   = low.reindex(close.index).ffill().copy()
-        for s in (close, high, low):
-            s.index = s.index.tz_localize(None)
+        series = series.dropna().copy()
+        series.index = series.index.tz_localize(None) 
 
         if upper_symbol == "0050.TW":
-            mask = close.index < pd.Timestamp("2014-01-02")
-            close.loc[mask] /= 4
-            high.loc[mask]  /= 4
-            low.loc[mask]   /= 4
+            series.loc[series.index < pd.Timestamp("2014-01-02")] /= 4
         elif upper_symbol == "0052.TW":
-            mask = close.index < pd.Timestamp("2025-11-17")
-            close.loc[mask] /= 7
-            high.loc[mask]  /= 7
-            low.loc[mask]   /= 7
-
-        return {"close": close, "high": high, "low": low}
+            series.loc[series.index < pd.Timestamp("2025-11-17")] /= 7
+        return series
 
 # 4. 主要執行邏輯
 if analyze_btn and symbols:
@@ -148,28 +126,18 @@ if analyze_btn and symbols:
                 st.info("💡 偵測到單一美股，已自動加入基準：**SPY**")
 
     raw_series_dict = {}
-    raw_high_dict   = {}
-    raw_low_dict    = {}
     stock_start_info = {}
 
     with st.spinner('正在計算績效與 MDD 區間...'):
         for sym in symbols:
             res = get_adjusted_data(sym, start_date, end_date)
             if res is not None:
-                close_s = res["close"]
-                high_s  = res["high"]
-                low_s   = res["low"]
-
                 # ✨ 終極修復：無論資料來源為何，強制在 end_date 畫下一刀，超過的資料全部丟棄！
-                close_s = close_s[close_s.index <= pd.Timestamp(end_date)]
-                high_s  = high_s[high_s.index   <= pd.Timestamp(end_date)]
-                low_s   = low_s[low_s.index     <= pd.Timestamp(end_date)]
-
-                actual_start_in_range = close_s[close_s.index >= pd.Timestamp(start_date)].index
+                res = res[res.index <= pd.Timestamp(end_date)]
+                
+                actual_start_in_range = res[res.index >= pd.Timestamp(start_date)].index
                 if not actual_start_in_range.empty:
-                    raw_series_dict[sym] = close_s
-                    raw_high_dict[sym]   = high_s
-                    raw_low_dict[sym]    = low_s
+                    raw_series_dict[sym] = res
                     stock_start_info[sym] = actual_start_in_range[0]
                 else:
                     st.warning(f"{sym} 在指定的日期區間內沒有有效數據。")
@@ -189,14 +157,12 @@ if analyze_btn and symbols:
         for sym, series in raw_series_dict.items():
             invest_series = series[series.index >= latest_start_date]
 
-            # 計算 MDD：高點用 High，低點用 Low
-            invest_high = raw_high_dict[sym][raw_high_dict[sym].index >= latest_start_date].reindex(invest_series.index).ffill()
-            invest_low  = raw_low_dict[sym][raw_low_dict[sym].index   >= latest_start_date].reindex(invest_series.index).ffill()
-            rolling_max  = invest_high.cummax()
-            drawdowns    = (invest_low - rolling_max) / rolling_max
+            # 計算 MDD
+            rolling_max = invest_series.cummax()
+            drawdowns = (invest_series - rolling_max) / rolling_max
             max_drawdown = drawdowns.min()
-            mdd_end_date   = drawdowns.idxmin()
-            mdd_start_date = invest_high[:mdd_end_date].idxmax()
+            mdd_end_date = drawdowns.idxmin()
+            mdd_start_date = invest_series[:mdd_end_date].idxmax()
             mdd_period = f"{mdd_start_date.strftime('%Y-%m-%d')} ~ {mdd_end_date.strftime('%Y-%m-%d')}"
 
             # 年度計算
@@ -250,7 +216,7 @@ if analyze_btn and symbols:
                 st.line_chart(plot_df)
 
         st.subheader("📋 績效與風險總結 (對齊區間)")
-        st.write("💡 **MDD 發生期間**：高點取當日**最高價 (High)**，低點取當日**最低價 (Low)**，標示從「最高價日期」跌至「最低價日期」的區間。")
+        st.write("💡 **MDD 發生期間**：標示資產從「該段最高點日期」跌到「該段最低點日期」的時間範圍。")
         st.table(pd.DataFrame(summary_data).set_index("股票代號"))
 
         st.divider()
