@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 import os
+import glob
 
 # 1. 網頁頁面配置
 st.set_page_config(page_title="多股績效與回撤區間分析", layout="wide")
@@ -69,10 +70,11 @@ def get_adjusted_data(symbol, start, end):
     # --- 處理本地 .GI (Goodinfo) ---
     elif upper_symbol.endswith('.GI'):
         prefix = upper_symbol.replace('.GI', '')
-        file_name = f"{prefix}_goodinfo.csv"
-        if not os.path.exists(file_name):
-            st.error(f"找不到本地檔案：{file_name} (請確認檔案是否上傳至正確位置)")
+        matches = glob.glob(f"{prefix}_*_gi.csv")
+        if not matches:
+            st.error(f"找不到本地檔案：{prefix}_*_gi.csv (請確認檔案是否上傳至正確位置)")
             return None
+        file_name = matches[0]
         try:
             df = pd.read_csv(file_name)
             df['Date'] = pd.to_datetime(df['Date'])
