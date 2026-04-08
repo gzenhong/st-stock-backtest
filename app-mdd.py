@@ -268,6 +268,11 @@ if analyze_btn and symbols:
             cagr = (current_assets / initial_capital) ** (365.25 / days) - 1 if days > 0 else 0
             actual_end = max(invest_series.index[-1], invest_high.index[-1])
 
+            # 目前股價（取最後一筆收盤價）與目前跌幅
+            current_price = float(invest_series.iloc[-1])
+            current_price_date = invest_series.index[-1]
+            current_drawdown = (current_price - period_high_val) / period_high_val if period_high_val != 0 else 0
+
             total_roi = (current_assets - initial_capital) / initial_capital
             summary_data.append({
                 "股票代號": sym,
@@ -278,6 +283,9 @@ if analyze_btn and symbols:
                 "最大回撤(MDD)": f"{max_drawdown * 100:.2f}%",
                 "區間最高價": f"{period_high_val:,.2f}",
                 "最高價日期": period_high_date.strftime('%Y-%m-%d'),
+                "目前股價": f"{current_price:,.2f}",
+                "目前股價日期": current_price_date.strftime('%Y-%m-%d'),
+                "目前跌幅": f"{current_drawdown * 100:.2f}%",
                 "區間最低價": f"{period_low_val:,.2f}",
                 "最低價日期": period_low_date.strftime('%Y-%m-%d'),
             })
@@ -286,8 +294,11 @@ if analyze_btn and symbols:
             dd_high_val = period_high_val
             dd_row = {
                 "股票": sym,
-                "High": f"{dd_high_val:,.2f}",
-                "date": period_high_date.strftime('%Y-%m-%d'),
+                "最高價": f"{dd_high_val:,.2f}",
+                "最高價日期": period_high_date.strftime('%Y-%m-%d'),
+                "目前股價": f"{current_price:,.2f}",
+                "目前股價日期": current_price_date.strftime('%Y-%m-%d'),
+                "目前跌幅": f"{current_drawdown * 100:.2f}%",
             }
             for pct in range(-10, -85, -5):
                 dd_row[f"{pct}%"] = f"{dd_high_val * (1 + pct / 100):,.2f}"
