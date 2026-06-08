@@ -4,6 +4,35 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 import os
+import glob
+import re
+import json
+
+# ── 預設股票清單（從檔案讀取，若無則用內建清單）────────────────
+_DEFAULTS_FILE = os.path.join(os.path.dirname(__file__), "default_stocks.json")
+_BUILTIN_DEFAULTS = {
+    "stocks": [
+        "2330.TW", "0050.TW", "0056.TW", "00646.TW", "00647L.TW",
+        "00662.TW", "00670L.TW", "00679B.TWO", "00757.TW", "00864B.TWO",
+        "00878.TW", "00919.TW", "00981A.TW", "00631L.TW", "009811.TW",
+        "009813.TW", "009815.TWO", "009816.TW",
+    ],
+    "start_date": "2026-01-01",
+}
+
+def _load_defaults() -> dict:
+    if os.path.exists(_DEFAULTS_FILE):
+        with open(_DEFAULTS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        # 相容舊格式（純 list）
+        if isinstance(data, list):
+            data = {"stocks": data, "start_date": _BUILTIN_DEFAULTS["start_date"]}
+        return data
+    return _BUILTIN_DEFAULTS
+
+def _save_defaults(data: dict):
+    with open(_DEFAULTS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 # 1. 網頁頁面配置
 st.set_page_config(page_title="績效、最大回測及跌幅對照表", layout="wide")
@@ -14,37 +43,18 @@ with st.sidebar:
     # 使用 form 包裝，解決需要按兩次按鈕的問題
     with st.form("settings_form"):
         st.header("1. 設定投資參數")
-        start_date = st.date_input("理想開始日期", value=datetime(2026, 1, 1), min_value=datetime(1900, 1, 1), max_value=datetime.today())
+        _saved = _load_defaults()
+        _default_start = datetime.strptime(_saved["start_date"], "%Y-%m-%d")
+        start_date = st.date_input("理想開始日期", value=_default_start, min_value=datetime(1900, 1, 1), max_value=datetime.today())
         end_date = st.date_input("理想結束日期", value=datetime.today(), min_value=datetime(1900, 1, 1), max_value=datetime.today())
-        initial_capital = 10000 
+        initial_capital = 10000
 
         st.divider()
         st.header("2. 輸入股票代號")
         st.caption("支援: .TW, .GI (Goodinfo), .TR (報酬指數)｜最多 25 支，輸入完按 Enter 可新增列")
-        input_df = pd.DataFrame([
-            {"代號": "2330.TW"},
-            {"代號": "0050.TW"},
-            {"代號": "0056.TW"},
-            {"代號": "00646.TW"},
-            {"代號": "00647L.TW"},
-            {"代號": "00662.TW"},
-            {"代號": "00670L.TW"},
-            {"代號": "00679B.TWO"},
-            {"代號": "00757.TW"},
-            {"代號": "00864B.TWO"},
-            {"代號": "00878.TW"},
-            {"代號": "00919.TW"},
-            {"代號": "00981A.TW"},
-            {"代號": "00631L.TW"},
-            {"代號": "009811.TW"},
-            {"代號": "009813.TW"},
-            {"代號": "009815.TWO"},
-            {"代號": "009816.TW"},
-            {"代號": ""},
-            {"代號": ""},
-            {"代號": ""},
-            {"代號": ""},
-        ])
+        input_df = pd.DataFrame(
+            [{"代號": s} for s in _saved["stocks"]] + [{"代號": ""}, {"代號": ""}]
+        )
         edited_df = st.data_editor(
             input_df,
             num_rows="dynamic",
@@ -56,13 +66,25 @@ with st.sidebar:
             st.warning("⚠️ 最多支援 25 支股票，超出的部分將被忽略。")
             edited_df = edited_df.head(25)
 
-        analyze_btn = st.form_submit_button("🚀 開始執行比較分析")
+        col_run, col_save = st.columns(2)
+        analyze_btn = col_run.form_submit_button("🚀 開始執行比較分析", use_container_width=True)
+        save_btn    = col_save.form_submit_button("💾 儲存為預設",       use_container_width=True)
 
     symbols = [
-        str(s["代號"]).strip().upper() 
-        for s in edited_df.to_dict('records') 
+        str(s["代號"]).strip().upper()
+        for s in edited_df.to_dict('records')
         if s["代號"] is not None and str(s["代號"]).strip() != ""
     ]
+
+    if save_btn:
+        if symbols:
+            _save_defaults({
+                "stocks": symbols,
+                "start_date": start_date.strftime("%Y-%m-%d"),
+            })
+            st.sidebar.success(f"✅ 已儲存：開始日期 {start_date}，{len(symbols)} 支股票")
+        else:
+            st.sidebar.warning("⚠️ 股票清單為空，未儲存")
 
 # 3. 核心處理函數
 def get_adjusted_data(symbol, start, end):
@@ -97,10 +119,27 @@ def get_adjusted_data(symbol, start, end):
     # --- 處理本地 .GI (Goodinfo) ---
     elif upper_symbol.endswith('.GI'):
         prefix = upper_symbol.replace('.GI', '')
-        file_name = f"{prefix}_goodinfo.csv"
-        if not os.path.exists(file_name):
-            st.error(f"找不到本地檔案：{file_name} (請確認檔案是否上傳至正確位置)")
+        matches = glob.glob(f"{prefix}_*_gi.csv")
+        if not matches:
+            st.error(f"找不到本地檔案：{prefix}_*_gi.csv (請確認檔案是否上傳至正確位置)")
             return None
+
+        # 從檔名解析日期範圍，選資料最長（跨度最大）的檔案
+        # 檔名格式：{prefix}_{startYYYYMMDD}-{endYYYYMMDD}_gi.csv
+        def parse_date_span(fname):
+            base = os.path.basename(fname)
+            m = re.search(r'_(\d{8})-(\d{8})_gi\.csv$', base, re.IGNORECASE)
+            if m:
+                try:
+                    d_start = datetime.strptime(m.group(1), "%Y%m%d")
+                    d_end   = datetime.strptime(m.group(2), "%Y%m%d")
+                    return (d_end - d_start).days
+                except Exception:
+                    pass
+            return 0  # 無法解析時給最低優先
+
+        file_name = max(matches, key=parse_date_span)
+
         try:
             df = pd.read_csv(file_name)
             df['Date'] = pd.to_datetime(df['Date'])
@@ -110,6 +149,15 @@ def get_adjusted_data(symbol, start, end):
             close = clean(target_col).sort_index().ffill()
             high  = clean('High').sort_index().ffill()
             low   = clean('Low').sort_index().ffill()
+
+            # 0050 拆股補正（2025-06-10 拆股 1:4）
+            # Adj Close 已做除權息還原，拆股前後連續，不需補正
+            # High / Low 是原始成交價，拆股後變小，需乘以 4 還原成舊尺度（用於 MDD 計算）
+            if prefix == '0050':
+                split_date = pd.Timestamp("2025-06-10")
+                for s in (high, low):
+                    s.loc[s.index > split_date] *= 4
+
             for s in (close, high, low):
                 s.index = s.index.tz_localize(None)
             return {"close": close, "high": high, "low": low}
@@ -134,9 +182,9 @@ def get_adjusted_data(symbol, start, end):
         data_close.index = data_close.index.tz_localize(None)
         data_hl.index    = data_hl.index.tz_localize(None)
 
-        close = data_close["Close"].dropna().copy()
-        high  = data_hl["High"].dropna().copy()
-        low   = data_hl["Low"].dropna().copy()
+        close = data_close["Close"].dropna().sort_index()
+        high  = data_hl["High"].dropna().sort_index()
+        low   = data_hl["Low"].dropna().sort_index()
 
         if upper_symbol == "0050.TW":
             close.loc[close.index < pd.Timestamp("2014-01-02")] /= 4
@@ -220,23 +268,24 @@ if analyze_btn and symbols:
             invest_series = series[series.index >= actual_start]
 
             # 計算 MDD：高點用 High，低點用 Low
-            invest_high = raw_high_dict[sym][raw_high_dict[sym].index >= actual_start]
-            invest_low  = raw_low_dict[sym][raw_low_dict[sym].index   >= actual_start]
+            invest_high = raw_high_dict[sym][raw_high_dict[sym].index >= actual_start].sort_index()
+            invest_low  = raw_low_dict[sym][raw_low_dict[sym].index   >= actual_start].sort_index()
             rolling_max  = invest_high.cummax()
             drawdowns    = (invest_low - rolling_max.reindex(invest_low.index).ffill()) / rolling_max.reindex(invest_low.index).ffill()
             max_drawdown = drawdowns.min()
             mdd_end_date   = drawdowns.idxmin()
-            mdd_start_date = invest_high[:mdd_end_date].idxmax()
+            # 用嚴格小於，確保高點日期一定在低點之前
+            high_before_end = invest_high[invest_high.index <= mdd_end_date]
+            mdd_start_date = high_before_end.idxmax() if not high_before_end.empty else mdd_end_date
             mdd_period = f"{mdd_start_date.strftime('%Y-%m-%d')} ~ {mdd_end_date.strftime('%Y-%m-%d')}"
 
-            # 區間最高價 / 最低價（最低價必須在最高價日期之後）
+            # MDD 對應的實際高點 / 低點價格
+            mdd_high_price = float(invest_high.loc[mdd_start_date])
+            mdd_low_price  = float(invest_low.loc[mdd_end_date])
+
+            # 全區間最高價（用於 Buy the Dip 跌幅對照表）
             period_high_val  = float(invest_high.max())
             period_high_date = invest_high.idxmax()
-            low_after_high   = invest_low[invest_low.index > period_high_date]
-            if low_after_high.empty:
-                low_after_high = invest_low[invest_low.index >= period_high_date]
-            period_low_val   = float(low_after_high.min())
-            period_low_date  = low_after_high.idxmin()
 
             # 年度計算
             years = sorted(list(set(invest_series.index.year)))
@@ -268,7 +317,7 @@ if analyze_btn and symbols:
             cagr = (current_assets / initial_capital) ** (365.25 / days) - 1 if days > 0 else 0
             actual_end = max(invest_series.index[-1], invest_high.index[-1])
 
-            # 目前股價（取最後一筆收盤價）與目前跌幅
+            # 目前股價（取最後一筆收盤價）與目前跌幅（從區間全域最高點起算）
             current_price = float(invest_series.iloc[-1])
             current_price_date = invest_series.index[-1]
             current_drawdown = (current_price - period_high_val) / period_high_val if period_high_val != 0 else 0
@@ -279,38 +328,63 @@ if analyze_btn and symbols:
                 "實際起始日": actual_start.strftime('%Y-%m-%d'),
                 "實際結束日": actual_end.strftime('%Y-%m-%d'),
                 "最終資產": f"${current_assets:,.0f}",
-                "報酬率": f"{total_roi * 100:.2f}%",
-                "最大回撤(MDD)": f"{max_drawdown * 100:.2f}%",
-                "區間最高價": f"{period_high_val:,.2f}",
-                "最高價日期": period_high_date.strftime('%Y-%m-%d'),
-                "目前股價": f"{current_price:,.2f}",
-                "目前股價日期": current_price_date.strftime('%Y-%m-%d'),
-                "目前跌幅": f"{current_drawdown * 100:.2f}%",
-                "區間最低價": f"{period_low_val:,.2f}",
-                "最低價日期": period_low_date.strftime('%Y-%m-%d'),
+                "報酬率": total_roi * 100,           # 數值，供排序
+                "最大跌幅(MDD)": max_drawdown * 100,  # 數值，供排序
+                "最高點日期": mdd_start_date.strftime('%Y-%m-%d'),
+                "最高點價格": mdd_high_price,
+                "最低點日期": mdd_end_date.strftime('%Y-%m-%d'),
+                "最低點價格": mdd_low_price,
+                "區間高點日期": period_high_date.strftime('%Y-%m-%d'),
+                "區間高點價格": period_high_val,
+                "目前股價": current_price,
+                "目前跌幅": current_drawdown * 100,   # 數值，供排序
             })
 
             # 以區間最高價為基準，計算各跌幅對應價格
             dd_high_val = period_high_val
             dd_row = {
                 "股票": sym,
-                "最高價": f"{dd_high_val:,.2f}",
+                "最高價": dd_high_val,
                 "最高價日期": period_high_date.strftime('%Y-%m-%d'),
-                "目前股價": f"{current_price:,.2f}",
+                "目前股價": current_price,
                 "目前股價日期": current_price_date.strftime('%Y-%m-%d'),
-                "目前跌幅": f"{current_drawdown * 100:.2f}%",
+                "目前跌幅": current_drawdown * 100,
             }
             for pct in range(-10, -85, -5):
-                dd_row[f"{pct}%"] = f"{dd_high_val * (1 + pct / 100):,.2f}"
+                dd_row[f"{pct}%"] = dd_high_val * (1 + pct / 100)
             drawdown_table_data.append(dd_row)
 
         st.subheader("📋 績效與最大回測")
-        st.write("💡 **MDD 發生期間**：高點取當日**最高價 (High)**，低點取當日**最低價 (Low)**，標示從「最高價日期」跌至「最低價日期」的區間。各股以自身實際資料範圍計算。")
-        summary_df = pd.DataFrame(summary_data).set_index("股票代號")
-        st.dataframe(summary_df, use_container_width=True, height=400)
+        st.write("💡 **MDD**：高點取當日 **High**，低點取當日 **Low**。最高點/最低點日期與價格為 MDD 實際對應的高低點，目前跌幅以最高點為基準。")
+        summary_df = (
+            pd.DataFrame(summary_data)
+            .sort_values("最大跌幅(MDD)")      # 數值升冪 → 最負在上
+            .set_index("股票代號")
+        )
+        pct_fmt = st.column_config.NumberColumn(format="%.2f%%")
+        price_fmt = st.column_config.NumberColumn(format="%.2f")
+        st.dataframe(
+            summary_df,
+            use_container_width=True,
+            height=400,
+            column_config={
+                "報酬率":      pct_fmt,
+                "最大跌幅(MDD)": pct_fmt,
+                "最高點價格":  price_fmt,
+                "最低點價格":  price_fmt,
+                "區間高點價格": price_fmt,
+                "目前股價":    price_fmt,
+                "目前跌幅":    pct_fmt,
+            },
+        )
+        csv_df = summary_df.copy()
+        for col in ["報酬率", "最大跌幅(MDD)", "目前跌幅"]:
+            csv_df[col] = csv_df[col].map(lambda x: f"{x:.2f}%")
+        for col in ["最高點價格", "最低點價格", "區間高點價格", "目前股價"]:
+            csv_df[col] = csv_df[col].map(lambda x: f"{x:,.2f}")
         st.download_button(
             label="⬇️ 下載績效總結 CSV",
-            data=summary_df.to_csv(encoding="utf-8-sig"),
+            data=csv_df.to_csv(encoding="utf-8-sig"),
             file_name="績效與最大回測.csv",
             mime="text/csv",
         )
@@ -318,11 +392,24 @@ if analyze_btn and symbols:
         st.divider()
         st.subheader("📉 從區間最高價起算的跌幅對照表 (Buy the Dip)")
         st.write("💡 以各股**區間最高價 (High)** 為基準，試算跌幅 -10% ~ -80% 時的對應價格。")
-        dd_df = pd.DataFrame(drawdown_table_data).set_index("股票")
-        st.dataframe(dd_df, use_container_width=True)
+        dd_df = (
+            pd.DataFrame(drawdown_table_data)
+            .sort_values("目前跌幅")   # 數值升冪 → 跌最多在上
+            .set_index("股票")
+        )
+        dd_price_fmt = st.column_config.NumberColumn(format="%.2f")
+        dd_pct_fmt   = st.column_config.NumberColumn(format="%.2f%%")
+        dd_col_cfg   = {"最高價": dd_price_fmt, "目前股價": dd_price_fmt, "目前跌幅": dd_pct_fmt}
+        dd_col_cfg  |= {f"{p}%": dd_price_fmt for p in range(-10, -85, -5)}
+        st.dataframe(dd_df, use_container_width=True, column_config=dd_col_cfg)
+        # CSV：把數值轉回易讀字串
+        dd_csv = dd_df.copy()
+        dd_csv["目前跌幅"] = dd_csv["目前跌幅"].map(lambda x: f"{x:.2f}%")
+        for col in ["最高價", "目前股價"] + [f"{p}%" for p in range(-10, -85, -5)]:
+            dd_csv[col] = dd_csv[col].map(lambda x: f"{x:,.2f}")
         st.download_button(
             label="⬇️ 下載跌幅對照表 CSV",
-            data=dd_df.to_csv(encoding="utf-8-sig"),
+            data=dd_csv.to_csv(encoding="utf-8-sig"),
             file_name="跌幅對照表.csv",
             mime="text/csv",
         )
